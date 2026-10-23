@@ -1,4 +1,4 @@
-/***** PRAYER TRACKER + DASHBOARD *****/
+/***** PRAYER + ROJA TRACKER + DASHBOARD *****/
 
 const CONFIG = {
   // Location (Dhaka). Change these for another city.
@@ -13,11 +13,28 @@ const CONFIG = {
   NOON_BLOCK: 10,
   MAGHRIB_BLOCK: 15,
 
+  // Roja: Sehri ends at Fajr, Iftar is at Maghrib.
+  SEHRI_OFFSET_MIN: 0,
+  IFTAR_OFFSET_MIN: 0,
+
   DASH: 'Dashboard',
+  OLD_DATA: 'Data',      // old helper sheet – deleted automatically if found
+  ROJA_PREFIX: 'Roja ',  // roja sheets are named "Roja 2026"
+
+  // Sheet sizes (unused rows/columns are deleted)
+  YEAR_ROWS: 367,        // needed by dashboard formulas (leap year + header)
+  DASH_ROWS: 85,
+  DASH_COLS: 25,
+
+  // Chart data block protection:
+  //   'warning' = pop-up warning before editing (works for everyone, including you)
+  //   'strict'  = only the owner can edit (others are blocked completely)
+  CHART_LOCK: 'warning',
 
   DONE: '✔ Done',
   KAZA: '↺ Kaza',
   SKIPPED: '➜ Skipped',
+  LATER: '↺ Done Later',   // roja only
 
   HEADERS: [
     'Date',
@@ -39,6 +56,9 @@ const CONFIG = {
     '#B4A7D6'
   ],
 
+  ROJA_HEADERS: ['Date', 'Day', 'Sehri Ends', 'Iftar', 'Roja Status', 'Notes'],
+  ROJA_HEADER_COLORS: [null, '#D9D2E9', '#FFE599', '#F9CB9C', '#B6D7A8', '#EFEFEF'],
+
   // Prayer groups -> column ranges on the year sheet
   GROUPS: [
     ['Fajr', 'B', 'C'],
@@ -50,13 +70,17 @@ const CONFIG = {
   ],
   FARZ_COLS: ['C', 'E', 'I', 'J', 'N', 'O'],
 
+  // Sunnah / Nafl columns: dropdown has ONLY Done and Skipped
+  SUNNAH_NAFL_COLS: ['B', 'D', 'F', 'G', 'H', 'K', 'L', 'M', 'P'],
+
   // When the Farz column (key) is Kaza, these columns are set to Skipped
+  // (only if they are still empty)
   KAZA_LINKS: {
-    'C': ['B'],               // Fajr Farz      -> Fajr Sunnah
-    'E': ['D', 'F', 'G'],     // Zuhr Farz      -> Zuhr Sunnah, Sunnah, Nafl
-    'I': ['H'],               // Asr Farz       -> Asr Sunnah
-    'J': ['K', 'L'],          // Maghrib Farz   -> Maghrib Sunnah, Nafl
-    'N': ['M', 'O', 'P']      // Isha Farz      -> Isha Sunnah, Sunnah, Nafl
+    'C': ['B'],
+    'E': ['D', 'F', 'G'],
+    'I': ['H'],
+    'J': ['K', 'L'],
+    'N': ['M', 'P']
   }
 };
 
@@ -64,14 +88,23 @@ const CONFIG = {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('🕌 Prayer Tracker')
-    .addItem('Add New Year…', 'addNewYear')
+    .addItem('Add New Year… (Namaz + Roja)', 'addNewYear')
+    .addItem('Add / Refresh Roja Sheet…', 'addRojaSheet')
     .addItem('Setup Current Sheet for a Year…', 'setupCurrentSheet')
     .addItem('Apply Kaza Rule to This Sheet', 'applyKazaRule')
     .addSeparator()
     .addItem('🔄 Update Dashboard', 'updateDashboard')
-    .addItem('Rebuild Dashboard', 'rebuildDashboard')
     .addItem('Install Auto-Update & Button', 'installTriggers')
     .addToUi();
+}
+
+/* ---------- HELPERS ---------- */
+// Deletes unused rows/columns so the sheet is exactly rows x cols
+function trimSheet_(sh, rows, cols) {
+  if (sh.getMaxRows() < rows) sh.insertRowsAfter(sh.getMaxRows(), rows - sh.getMaxRows());
+  if (sh.getMaxColumns() < cols) sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
+  if (sh.getMaxRows() > rows) sh.deleteRows(rows + 1, sh.getMaxRows() - rows);
+  if (sh.getMaxColumns() > cols) sh.deleteColumns(cols + 1, sh.getMaxColumns() - cols);
 }
 
 /* ---------- YEAR GENERATION ---------- */
@@ -87,25 +120,45 @@ function askYear_(title) {
   return year;
 }
 
-// Creates a sheet named after the year (e.g. "2027")
+// Creates BOTH sheets for a year: "2027" (Namaz) and "Roja 2027"
 function addNewYear() {
   const year = askYear_('Add New Year');
   if (!year) return;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(String(year));
-  if (sheet) {
+  const rojaName = CONFIG.ROJA_PREFIX + year;
+  let namaz = ss.getSheetByName(String(year));
+  let roja = ss.getSheetByName(rojaName);
+
+  if (namaz || roja) {
     const ui = SpreadsheetApp.getUi();
-    const ans = ui.alert('Sheet "' + year + '" already exists',
-      'Rebuild its dates and formatting? Your marks are kept.', ui.ButtonSet.YES_NO);
+    const ans = ui.alert('Sheet(s) for ' + year + ' already exist',
+      'Rebuild dates and formatting for "' + year + '" and "' + rojaName + '"? Your marks are kept.', ui.ButtonSet.YES_NO);
     if (ans !== ui.Button.YES) return;
-  } else {
-    sheet = ss.insertSheet(String(year));
   }
-  buildYear_(sheet, year);
+  if (!namaz) namaz = ss.insertSheet(String(year));
+  if (!roja) roja = ss.insertSheet(rojaName);
+
+  buildYear_(namaz, year);
+  buildRojaYear_(roja, year);
   ensureDashboard_(ss, false);
   refreshTrackerDropdown_(null, true);   // dashboard jumps to the latest year
+  updateDashboard();
+  ss.setActiveSheet(namaz);
+}
+
+// Creates / refreshes only the Roja sheet for a year
+function addRojaSheet() {
+  const year = askYear_('Add / Refresh Roja Sheet');
+  if (!year) return;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const name = CONFIG.ROJA_PREFIX + year;
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  buildRojaYear_(sheet, year);
+  ensureDashboard_(ss, false);
+  refreshTrackerDropdown_(null, false);
+  updateDashboard();
   ss.setActiveSheet(sheet);
-  updatePrayerTimes();
 }
 
 // Formats the current sheet for a year AND renames it to that year
@@ -114,8 +167,9 @@ function setupCurrentSheet() {
   if (!year) return;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getActiveSheet();
-  if (sheet.getName() === CONFIG.DASH) {
-    SpreadsheetApp.getUi().alert('Open your tracker sheet first, then run this again.');
+  const nm = sheet.getName();
+  if (nm === CONFIG.DASH || nm === CONFIG.OLD_DATA || nm.indexOf(CONFIG.ROJA_PREFIX) === 0) {
+    SpreadsheetApp.getUi().alert('Open your Namaz tracker sheet first, then run this again.');
     return;
   }
   const clash = ss.getSheetByName(String(year));
@@ -136,15 +190,9 @@ function buildYear_(sheet, year) {
   const lastRow = days + 1;
   const cols = CONFIG.HEADERS.length; // 17 (A:Q)
 
-  if (sheet.getMaxRows() < lastRow + 5) sheet.insertRowsAfter(sheet.getMaxRows(), lastRow + 5 - sheet.getMaxRows());
+  // Make sure the grid is big enough first
+  if (sheet.getMaxRows() < CONFIG.YEAR_ROWS) sheet.insertRowsAfter(sheet.getMaxRows(), CONFIG.YEAR_ROWS - sheet.getMaxRows());
   if (sheet.getMaxColumns() < cols) sheet.insertColumnsAfter(sheet.getMaxColumns(), cols - sheet.getMaxColumns());
-
-  // Remove the old prayer-times panel (now lives on the Dashboard)
-  if (sheet.getMaxColumns() >= 19) {
-    const old = sheet.getRange(1, 18, Math.min(20, sheet.getMaxRows()), sheet.getMaxColumns() - 17);
-    old.breakApart();
-    old.clear();
-  }
 
   // Clear leftover rows below the year (e.g. leap year -> normal year)
   const maxRows = sheet.getMaxRows();
@@ -169,12 +217,18 @@ function buildYear_(sheet, year) {
   sheet.getRange(2, 1, days, 1).setValues(dates)
     .setNumberFormat('d-mmm-yyyy').setFontWeight('normal').setHorizontalAlignment('right');
 
-  // Dropdowns
-  const rule = SpreadsheetApp.newDataValidation()
+  // Dropdowns: Farz + Witr = Done/Kaza/Skipped ; Sunnah + Nafl = Done/Skipped only
+  const fullRule = SpreadsheetApp.newDataValidation()
     .requireValueInList([CONFIG.DONE, CONFIG.KAZA, CONFIG.SKIPPED], true)
     .setAllowInvalid(true).build();
+  const shortRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList([CONFIG.DONE, CONFIG.SKIPPED], true)
+    .setAllowInvalid(false).build();
   const marks = sheet.getRange(2, 2, days, cols - 1);
-  marks.setDataValidation(rule).setHorizontalAlignment('center');
+  marks.setDataValidation(fullRule).setHorizontalAlignment('center');
+  CONFIG.SUNNAH_NAFL_COLS.forEach(function (letter) {
+    sheet.getRange(2, colIdx_(letter), days, 1).setDataValidation(shortRule);
+  });
 
   // Colour rules + today highlight
   const rules = [
@@ -202,14 +256,15 @@ function buildYear_(sheet, year) {
   CONFIG.GROUPS.forEach(function (g, idx) {
     const c1 = g[1].charCodeAt(0) - 64;
     const c2 = g[2].charCodeAt(0) - 64;
-    // alternate shading per prayer group (marks still colour on top)
     sheet.getRange(2, c1, days, c2 - c1 + 1).setBackground(idx % 2 === 0 ? '#FFFFFF' : '#F3F3F3');
-    // thick divider before each group
     sheet.getRange(1, c1, lastRow, 1)
       .setBorder(null, true, null, null, null, null, '#000000', SpreadsheetApp.BorderStyle.SOLID_THICK);
   });
   sheet.getRange(1, cols, lastRow, 1)
     .setBorder(null, null, null, true, null, null, '#000000', SpreadsheetApp.BorderStyle.SOLID_THICK);
+
+  // Delete unused rows / columns (also removes the old prayer-times panel)
+  trimSheet_(sheet, CONFIG.YEAR_ROWS, cols);
 
   // Scroll to today if this is the current year
   const now = new Date();
@@ -219,7 +274,145 @@ function buildYear_(sheet, year) {
   }
 }
 
-/* ---------- KAZA RULE: Farz = Kaza  ->  linked Sunnah/Nafl = Skipped ---------- */
+/* ---------- ROJA SHEET ---------- */
+function pad2_(n) { return (n < 10 ? '0' : '') + n; }
+
+// Gets Fajr + Maghrib (minutes) for every day of a year. Returns { 'dd-mm-yyyy': {fajr, maghrib} }
+function fetchYearTimings_(year) {
+  const base = 'https://api.aladhan.com/v1/calendar/' + year;
+  const q = '?latitude=' + CONFIG.LAT + '&longitude=' + CONFIG.LNG +
+    '&method=' + CONFIG.METHOD + '&school=' + CONFIG.SCHOOL +
+    '&timezonestring=' + encodeURIComponent(CONFIG.TZ);
+  const map = {};
+
+  function ingest(data) {
+    let list = [];
+    if (Array.isArray(data)) list = data;
+    else if (data && typeof data === 'object') {
+      Object.keys(data).forEach(function (k) { list = list.concat(data[k]); });
+    }
+    list.forEach(function (day) {
+      try {
+        map[day.date.gregorian.date] = {
+          fajr: toMin_(day.timings.Fajr),
+          maghrib: toMin_(day.timings.Maghrib)
+        };
+      } catch (e) { /* skip bad entry */ }
+    });
+  }
+
+  // 1) whole year in one call
+  try {
+    const r = UrlFetchApp.fetch(base + q + '&annual=true', { muteHttpExceptions: true });
+    if (r.getResponseCode() === 200) ingest(JSON.parse(r.getContentText()).data);
+  } catch (e) { /* fall through */ }
+
+  // 2) fallback: month by month
+  if (Object.keys(map).length < 300) {
+    for (let m = 1; m <= 12; m++) {
+      try {
+        const r = UrlFetchApp.fetch('https://api.aladhan.com/v1/calendar/' + year + '/' + m + q, { muteHttpExceptions: true });
+        if (r.getResponseCode() === 200) ingest(JSON.parse(r.getContentText()).data);
+      } catch (e) { /* skip */ }
+    }
+  }
+  return map;
+}
+
+function buildRojaYear_(sheet, year) {
+  const start = new Date(year, 0, 1);
+  const days = Math.round((new Date(year + 1, 0, 1) - start) / 86400000);
+  const lastRow = days + 1;
+  const cols = CONFIG.ROJA_HEADERS.length; // 6 (A:F)
+
+  if (sheet.getMaxRows() < CONFIG.YEAR_ROWS) sheet.insertRowsAfter(sheet.getMaxRows(), CONFIG.YEAR_ROWS - sheet.getMaxRows());
+  if (sheet.getMaxColumns() < cols) sheet.insertColumnsAfter(sheet.getMaxColumns(), cols - sheet.getMaxColumns());
+
+  // Leftover rows (leap year -> normal year)
+  const maxRows = sheet.getMaxRows();
+  if (maxRows > lastRow) {
+    const extra = sheet.getRange(lastRow + 1, 1, maxRows - lastRow, cols);
+    extra.clearContent(); extra.clearDataValidations(); extra.clearFormat();
+  }
+
+  // Headers
+  const h = sheet.getRange(1, 1, 1, cols);
+  h.setValues([CONFIG.ROJA_HEADERS]).setFontWeight('bold').setFontColor('#000000')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+  h.setBackgrounds([CONFIG.ROJA_HEADER_COLORS]);
+  sheet.setRowHeight(1, 40);
+
+  // Dates + weekday
+  const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dateRows = [], dayRows = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(year, 0, 1 + i);
+    dateRows.push([d]);
+    dayRows.push([dow[d.getDay()]]);
+  }
+  sheet.getRange(2, 1, days, 1).setValues(dateRows).setNumberFormat('d-mmm-yyyy')
+    .setFontWeight('normal').setHorizontalAlignment('right');
+  sheet.getRange(2, 2, days, 1).setValues(dayRows).setHorizontalAlignment('center');
+
+  // Sehri + Iftar times for the whole year
+  const times = fetchYearTimings_(year);
+  const tv = [];
+  let found = 0;
+  for (let i = 0; i < days; i++) {
+    const d = new Date(year, 0, 1 + i);
+    const key = pad2_(d.getDate()) + '-' + pad2_(d.getMonth() + 1) + '-' + d.getFullYear();
+    const t = times[key];
+    if (t) { found++; tv.push([(t.fajr + CONFIG.SEHRI_OFFSET_MIN) / 1440, (t.maghrib + CONFIG.IFTAR_OFFSET_MIN) / 1440]); }
+    else tv.push(['', '']);
+  }
+  sheet.getRange(2, 3, days, 2).setValues(tv).setNumberFormat('h:mm AM/PM').setHorizontalAlignment('center');
+  if (found < days) {
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      'Sehri/Iftar times found for ' + found + ' of ' + days + ' days. Run "Add / Refresh Roja Sheet" again to retry.',
+      'Prayer Tracker', 8);
+  }
+
+  // Status dropdown (existing marks are kept)
+  const status = sheet.getRange(2, 5, days, 1);
+  status.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList([CONFIG.DONE, CONFIG.SKIPPED, CONFIG.LATER], true)
+    .setAllowInvalid(false).build()).setHorizontalAlignment('center');
+
+  // Colour rules + today highlight
+  sheet.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(CONFIG.DONE)
+      .setBackground('#B7E1CD').setFontColor('#0B5394').setRanges([status]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(CONFIG.LATER)
+      .setBackground('#CFE2F3').setFontColor('#1155CC').setRanges([status]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(CONFIG.SKIPPED)
+      .setBackground('#F4CCCC').setFontColor('#990000').setRanges([status]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=$A2=TODAY()')
+      .setBackground('#FFF2CC').setBold(true).setRanges([sheet.getRange(2, 1, days, 4)]).build()
+  ]);
+
+  // Layout
+  sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(1);
+  sheet.setColumnWidth(1, 110); sheet.setColumnWidth(2, 60);
+  sheet.setColumnWidth(3, 100); sheet.setColumnWidth(4, 100);
+  sheet.setColumnWidth(5, 130); sheet.setColumnWidth(6, 220);
+  sheet.getRange(1, 1, lastRow, cols)
+    .setBorder(true, true, true, true, true, true, '#BDBDBD', SpreadsheetApp.BorderStyle.SOLID);
+  sheet.setTabColor('#B4A7D6');
+
+  // Delete unused rows / columns
+  trimSheet_(sheet, CONFIG.YEAR_ROWS, cols);
+
+  const now = new Date();
+  if (now.getFullYear() === year) {
+    const dayOfYear = Math.floor((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - start) / 86400000);
+    sheet.setActiveRange(sheet.getRange(2 + dayOfYear, 5));
+  }
+}
+
+/* ---------- KAZA RULE ----------
+   Farz = Kaza  ->  linked Sunnah/Nafl cells become Skipped,
+   but ONLY if those cells are currently empty. */
 function colIdx_(letter) {
   return letter.charCodeAt(0) - 64;
 }
@@ -228,7 +421,7 @@ function colIdx_(letter) {
 function onEdit(e) {
   if (!e || !e.range) return;
   const sh = e.range.getSheet();
-  if (!/^\d{4}$/.test(sh.getName())) return;       // year sheets only
+  if (!/^\d{4}$/.test(sh.getName())) return;       // Namaz year sheets only
   const r = e.range;
   if (r.getRow() < 2) return;
   if (r.getNumRows() * r.getNumColumns() > 200) return; // ignore huge pastes; use the menu item instead
@@ -240,18 +433,20 @@ function onEdit(e) {
       const letter = String.fromCharCode(64 + r.getColumn() + j);
       const deps = CONFIG.KAZA_LINKS[letter];
       if (!deps) continue;
+      const row = r.getRow() + i;
       deps.forEach(function (d) {
-        sh.getRange(d + (r.getRow() + i)).setValue(CONFIG.SKIPPED);
+        const cell = sh.getRange(d + row);
+        if (cell.getValue() === '') cell.setValue(CONFIG.SKIPPED);   // only fill empty cells
       });
     }
   }
 }
 
-// One-time / on-demand: apply the rule to every row of the current sheet
+// On demand: apply the rule to every row of the current sheet (empty cells only)
 function applyKazaRule() {
   const sh = SpreadsheetApp.getActiveSheet();
   if (!/^\d{4}$/.test(sh.getName())) {
-    SpreadsheetApp.getUi().alert('Open a year sheet (e.g. 2026) first.');
+    SpreadsheetApp.getUi().alert('Open a Namaz year sheet (e.g. 2026) first.');
     return;
   }
   const last = sh.getLastRow();
@@ -264,34 +459,129 @@ function applyKazaRule() {
       if (row[colIdx_(farz) - 1] !== CONFIG.KAZA) return;
       CONFIG.KAZA_LINKS[farz].forEach(function (d) {
         const k = colIdx_(d) - 1;
-        if (row[k] !== CONFIG.SKIPPED) { row[k] = CONFIG.SKIPPED; changed++; }
+        if (row[k] === '') { row[k] = CONFIG.SKIPPED; changed++; }
       });
     });
   });
   rng.setValues(v);
-  SpreadsheetApp.getActiveSpreadsheet().toast(changed + ' cell(s) set to Skipped.', 'Prayer Tracker', 5);
+  SpreadsheetApp.getActiveSpreadsheet().toast(changed + ' empty cell(s) set to Skipped.', 'Prayer Tracker', 5);
 }
 
-/* ---------- DASHBOARD ---------- */
-// Reference a range on the year sheet chosen in Dashboard!C3
+/* ---------- FORMULA HELPERS ---------- */
+// Reference a range on the Namaz year sheet chosen in Dashboard!C3
 function rng_(a1) {
   return `INDIRECT("'"&$C$3&"'!${a1}")`;
 }
-
-function rebuildDashboard() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const old = ss.getSheetByName(CONFIG.DASH);
-  const keep = old ? String(old.getRange('C3').getValue()) : null;
-  const sh = ensureDashboard_(ss, true);
-  if (keep && ss.getSheetByName(keep)) sh.getRange('C3').setValue(Number(keep));
-  updatePrayerTimes();
-  ss.setActiveSheet(sh);
+// Reference a range on the Roja sheet of the chosen year
+function rj_(a1) {
+  return `INDIRECT("'${CONFIG.ROJA_PREFIX}"&$C$3&"'!${a1}")`;
 }
 
+// Farz Done / Farz Marked formula parts, limited by a mask (use '1' for the whole year)
+function farzParts_(mask) {
+  const done = CONFIG.FARZ_COLS.map(function (c) {
+    return 'SUMPRODUCT(' + mask + '*(' + rng_(c + '2:' + c + '367') + '="' + CONFIG.DONE + '"))';
+  }).join('+');
+  const marked = CONFIG.FARZ_COLS.map(function (c) {
+    return 'SUMPRODUCT(' + mask + '*(' + rng_(c + '2:' + c + '367') + '<>""))';
+  }).join('+');
+  return { done: done, marked: marked };
+}
+function farzPct_(mask) {
+  const p = farzParts_(mask);
+  return '=IFERROR(IF((' + p.marked + ')=0,NA(),(' + p.done + ')/(' + p.marked + ')),NA())';
+}
+
+// Array of 1/0 per day: all Farz Done
+function perfectArr_() {
+  return CONFIG.FARZ_COLS.map(function (c) {
+    return '(' + rng_(c + '2:' + c + '367') + '="' + CONFIG.DONE + '")';
+  }).join('*');
+}
+// Array of TRUE/FALSE per day: at least one Farz marked
+function markedArr_() {
+  return '(' + CONFIG.FARZ_COLS.map(function (c) {
+    return '(' + rng_(c + '2:' + c + '367') + '<>"")';
+  }).join('+') + ')>0';
+}
+const SCAN_STREAK_ = 'SCAN(0,p,LAMBDA(a,v,IF(v=1,a+1,0)))';
+
+/* ---------- CHART DATA BLOCK (on the Dashboard, columns P:Y) ---------- */
+// Protects the chart data block (P4:Y59) so it is read-only
+function lockChartData_(sh) {
+  const DESC = 'Chart data (read only)';
+
+  // Remove old locks first so they don't pile up every time the dashboard is rebuilt
+  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) {
+    if (p.getDescription() === DESC) p.remove();
+  });
+
+  const p = sh.getRange('P4:Y59').protect().setDescription(DESC);
+
+  if (CONFIG.CHART_LOCK === 'strict') {
+    const me = Session.getEffectiveUser();
+    p.addEditor(me);
+    p.removeEditors(p.getEditors().filter(function (u) {
+      return u.getEmail() !== me.getEmail();
+    }));
+    if (p.canDomainEdit()) p.setDomainEdit(false);
+  } else {
+    p.setWarningOnly(true);
+  }
+}
+
+function buildChartData_(sh) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const hdr = function (a1, vals) {
+    sh.getRange(a1).setValues([vals]).setFontWeight('bold').setBackground('#EFEFEF');
+  };
+
+  sh.getRange('P4:Y4').merge().setValue('Chart data (used by the graphs — do not edit)')
+    .setFontStyle('italic').setHorizontalAlignment('left');
+
+  // Weekly Farz % (P:Q) rows 7..59
+  hdr('P6:Q6', ['Week', 'Farz Done %']);
+  const A = rng_('A2:A367');
+  const wkNum = [], wkF = [];
+  for (let w = 1; w <= 53; w++) {
+    wkNum.push([w]);
+    wkF.push([farzPct_('(INT((' + A + '-DATE(YEAR(' + A + '),1,1))/7)+1=' + w + ')')]);
+  }
+  sh.getRange(7, 16, 53, 1).setValues(wkNum);
+  sh.getRange(7, 17, 53, 1).setFormulas(wkF).setNumberFormat('0%');
+
+  // Monthly Farz % (S:T) rows 7..18
+  hdr('S6:T6', ['Month', 'Farz Done %']);
+  sh.getRange(7, 19, 12, 1).setValues(months.map(function (m) { return [m]; }));
+  sh.getRange(7, 20, 12, 1).setFormulas(months.map(function (m, i) {
+    return [farzPct_('(MONTH(' + A + ')=' + (i + 1) + ')')];
+  })).setNumberFormat('0%');
+
+  // Monthly Roja counts (V:Y) rows 7..18
+  hdr('V6:Y6', ['Month', 'Done', 'Done Later', 'Skipped']);
+  sh.getRange(7, 22, 12, 1).setValues(months.map(function (m) { return [m]; }));
+  const rf = months.map(function (m, i) {
+    const f = function (s) {
+      return '=IFERROR(SUMPRODUCT((MONTH(' + rj_('A2:A367') + ')=' + (i + 1) + ')*(' + rj_('E2:E367') + '="' + s + '")),0)';
+    };
+    return [f(CONFIG.DONE), f(CONFIG.LATER), f(CONFIG.SKIPPED)];
+  });
+  sh.getRange(7, 23, 12, 3).setFormulas(rf);
+
+  sh.getRange('P5:Y59').setFontColor('#999999');
+  sh.getRange('P6:Q6').setFontColor('#666666');
+  sh.getRange('S6:T6').setFontColor('#666666');
+  sh.getRange('V6:Y6').setFontColor('#666666');
+  sh.getRange('P7:Y59').setHorizontalAlignment('center');
+  lockChartData_(sh);   // make the block read-only
+}
+
+/* ---------- DASHBOARD ---------- */
 function ensureDashboard_(ss, force) {
   let sh = ss.getSheetByName(CONFIG.DASH);
   if (sh && !force) return sh;
   if (sh) {
+    sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart();
     sh.clear();
     sh.clearConditionalFormatRules();
     sh.getCharts().forEach(function (c) { sh.removeChart(c); });
@@ -299,9 +589,13 @@ function ensureDashboard_(ss, force) {
     sh = ss.insertSheet(CONFIG.DASH, 0);
   }
 
+  // Delete the old Data helper sheet if it still exists
+  const oldData = ss.getSheetByName(CONFIG.OLD_DATA);
+  if (oldData) ss.deleteSheet(oldData);
+
   ss.setSpreadsheetTimeZone(CONFIG.TZ);
-  if (sh.getMaxRows() < 40) sh.insertRowsAfter(sh.getMaxRows(), 40 - sh.getMaxRows());
-  if (sh.getMaxColumns() < 12) sh.insertColumnsAfter(sh.getMaxColumns(), 12 - sh.getMaxColumns());
+  if (sh.getMaxRows() < CONFIG.DASH_ROWS) sh.insertRowsAfter(sh.getMaxRows(), CONFIG.DASH_ROWS - sh.getMaxRows());
+  if (sh.getMaxColumns() < CONFIG.DASH_COLS) sh.insertColumnsAfter(sh.getMaxColumns(), CONFIG.DASH_COLS - sh.getMaxColumns());
   sh.setHiddenGridlines(true);
 
   // Column widths
@@ -311,10 +605,12 @@ function ensureDashboard_(ss, force) {
   sh.setColumnWidth(5, 190); sh.setColumnWidth(6, 110);
   sh.setColumnWidth(7, 20);
   sh.setColumnWidth(8, 120);
-  sh.setColumnWidths(9, 3, 80);
+  sh.setColumnWidths(9, 4, 80);
+  sh.setColumnWidth(13, 20);
+  sh.setColumnWidths(16, 10, 85);   // chart data block P:Y
 
   // Title (shows the selected year)
-  sh.getRange('B1:K1').merge()
+  sh.getRange('B1:L1').merge()
     .setFormula('="🕌 Prayer Dashboard — "&$C$3')
     .setFontSize(18).setFontWeight('bold').setHorizontalAlignment('center')
     .setBackground('#274E13').setFontColor('#FFFFFF');
@@ -328,6 +624,9 @@ function ensureDashboard_(ss, force) {
   sh.getRange('F3').insertCheckboxes().setValue(false)
     .setHorizontalAlignment('center').setBackground('#D9EAD3');
   refreshTrackerDropdown_(sh, true);
+
+  // Chart data block (needs C3 to be set first)
+  buildChartData_(sh);
 
   // ----- Prayer times block (B5:C17) – values filled by updatePrayerTimes -----
   sh.getRange('B5:C5').merge().setBackground('#B6D7A8').setFontWeight('bold').setHorizontalAlignment('center');
@@ -343,13 +642,31 @@ function ensureDashboard_(ss, force) {
   sh.getRange('C15:C17').setHorizontalAlignment('center');
   sh.getRange('B5:C17').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
 
-  // ----- Today's progress (E5:F9) – only shown when the current year is selected -----
+  // ----- Roja block (B19:C26) -----
+  sh.getRange('B19:C19').merge().setFormula('="🌙 Roja — "&$C$3')
+    .setBackground('#D9D2E9').setFontWeight('bold').setHorizontalAlignment('center');
+  sh.getRange('B20:B26').setValues([
+    ['Sehri ends (today)'], ['Iftar (today)'], ["Today's Roja"],
+    [CONFIG.DONE], [CONFIG.LATER], [CONFIG.SKIPPED + ' (pending)'], ['Completion %']
+  ]).setFontWeight('bold');
+  sh.getRange('C20:C21').setNumberFormat('h:mm AM/PM');   // filled by updatePrayerTimes
+  sh.getRange('C22').setFormula(
+    '=IF(VALUE($C$3)<>YEAR(TODAY()),"–",IFERROR(IF(INDEX(' + rj_('E1:E367') + ',MATCH(TODAY(),' + rj_('A1:A367') + ',0))="","Not marked",INDEX(' +
+    rj_('E1:E367') + ',MATCH(TODAY(),' + rj_('A1:A367') + ',0))),"–"))');
+  sh.getRange('C23').setFormula('=IFERROR(COUNTIF(' + rj_('E2:E367') + ',"' + CONFIG.DONE + '"),0)');
+  sh.getRange('C24').setFormula('=IFERROR(COUNTIF(' + rj_('E2:E367') + ',"' + CONFIG.LATER + '"),0)');
+  sh.getRange('C25').setFormula('=IFERROR(COUNTIF(' + rj_('E2:E367') + ',"' + CONFIG.SKIPPED + '"),0)');
+  sh.getRange('C26').setFormula('=IFERROR((C23+C24)/(C23+C24+C25),0)').setNumberFormat('0.0%');
+  sh.getRange('C20:C26').setHorizontalAlignment('center');
+  sh.getRange('B19:C26').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
+
+  // ----- Today's progress (E5:F9) -----
   sh.getRange('E5:F5').merge().setValue("✅ Today's Progress")
     .setBackground('#A4C2F4').setFontWeight('bold').setHorizontalAlignment('center');
   const stat = [CONFIG.DONE, CONFIG.KAZA, CONFIG.SKIPPED];
   const todayF = stat.map(function (s) {
     return ['=IFERROR(IF(VALUE($C$3)<>YEAR(TODAY()),"–",COUNTIF(INDEX(' +
-      rng_('B1:Q400') + ',MATCH(TODAY(),' + rng_('A1:A400') + ',0),0),"' + s + '")),0)'];
+      rng_('B1:Q367') + ',MATCH(TODAY(),' + rng_('A1:A367') + ',0),0),"' + s + '")),0)'];
   });
   sh.getRange('E6:E9').setValues([[CONFIG.DONE], [CONFIG.KAZA], [CONFIG.SKIPPED], ['Not marked yet']]).setFontWeight('bold');
   sh.getRange('F6:F8').setFormulas(todayF);
@@ -373,29 +690,59 @@ function ensureDashboard_(ss, force) {
   sh.getRange('F12:F16').setHorizontalAlignment('center');
   sh.getRange('E11:F16').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
 
-  // ----- By prayer (H5:K12) -----
-  sh.getRange('H5:K5').merge().setValue('📖 By Prayer')
+  // ----- Streaks & Motivation (E18:F24) -----
+  sh.getRange('E18:F18').merge().setValue('🔥 Streaks & Motivation')
+    .setBackground('#FFE599').setFontWeight('bold').setHorizontalAlignment('center');
+  sh.getRange('E19:E23').setValues([
+    ['Current streak (all Farz)'], ['Best streak'], ['Perfect Farz days'], ['Farz Done % (year)'], ['Change vs last month']
+  ]).setFontWeight('bold');
+
+  const P = 'ARRAYFORMULA(' + perfectArr_() + ')';
+  const M = 'ARRAYFORMULA(' + markedArr_() + ')';
+  // Current streak = streak value on the last day that has any Farz marked
+  sh.getRange('F19').setFormula(
+    '=IFERROR(LET(p,' + P + ',m,' + M + ',s,' + SCAN_STREAK_ + ',LOOKUP(2,ARRAYFORMULA(1/m),s)),0)');
+  sh.getRange('F20').setFormula(
+    '=IFERROR(LET(p,' + P + ',MAX(' + SCAN_STREAK_ + ')),0)');
+  sh.getRange('F21').setFormula('=IFERROR(SUMPRODUCT(' + perfectArr_() + '),0)');
+  const yp = farzParts_('1');
+  sh.getRange('F22').setFormula('=IFERROR((' + yp.done + ')/(' + yp.marked + '),0)').setNumberFormat('0.0%');
+  sh.getRange('F23').setFormula(
+    '=IF(VALUE($C$3)<>YEAR(TODAY()),"–",IFERROR(INDEX($T$7:$T$18,MONTH(TODAY()))-INDEX($T$7:$T$18,MONTH(TODAY())-1),"–"))'
+  ).setNumberFormat('+0.0%;-0.0%;0.0%');
+  sh.getRange('E24:F24').merge().setFormula(
+    '=IF(ISNUMBER(F23),IF(F23>0,"📈 Improving — keep it up, in shaa Allah!",IF(F23=0,"➡ Steady — push a little harder 💪","📉 A dip this month — start fresh today 🌙")),IF(F19>=7,"🔥 "&F19&"-day streak! Don\'t break it!","🤲 Every prayer on time counts"))'
+  ).setWrap(true).setHorizontalAlignment('center').setFontWeight('bold').setBackground('#FFF2CC');
+  sh.setRowHeight(24, 36);
+  sh.getRange('F19:F23').setHorizontalAlignment('center');
+  sh.getRange('E18:F24').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
+
+  // ----- By prayer (H5:L12) -----
+  sh.getRange('H5:L5').merge().setValue('📖 By Prayer')
     .setBackground('#B4A7D6').setFontWeight('bold').setHorizontalAlignment('center');
-  sh.getRange('H6:K6').setValues([['Prayer', 'Done', 'Kaza', 'Skipped']])
+  sh.getRange('H6:L6').setValues([['Prayer', 'Done', 'Kaza', 'Skipped', 'Done %']])
     .setFontWeight('bold').setHorizontalAlignment('center').setBackground('#EFEFEF');
   const prNames = CONFIG.GROUPS.map(function (g) { return [g[0]]; });
-  const pr = CONFIG.GROUPS.map(function (g) {
+  const pr = CONFIG.GROUPS.map(function (g, i) {
     const a1 = g[1] + '2:' + g[2] + '367';
+    const r = i + 7;
     return [
       '=COUNTIF(' + rng_(a1) + ',"' + CONFIG.DONE + '")',
       '=COUNTIF(' + rng_(a1) + ',"' + CONFIG.KAZA + '")',
-      '=COUNTIF(' + rng_(a1) + ',"' + CONFIG.SKIPPED + '")'];
+      '=COUNTIF(' + rng_(a1) + ',"' + CONFIG.SKIPPED + '")',
+      '=IFERROR(I' + r + '/(I' + r + '+J' + r + '+K' + r + '),0)'];
   });
   sh.getRange('H7:H12').setValues(prNames);
-  sh.getRange('I7:K12').setFormulas(pr);
+  sh.getRange('I7:L12').setFormulas(pr);
+  sh.getRange('L7:L12').setNumberFormat('0%');
   sh.getRange('H7:H12').setFontWeight('bold');
-  sh.getRange('I7:K12').setHorizontalAlignment('center');
-  sh.getRange('H5:K12').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('I7:L12').setHorizontalAlignment('center');
+  sh.getRange('H5:L12').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
 
-  // ----- By month (H14:K27) -----
-  sh.getRange('H14:K14').merge().setValue('📅 By Month')
+  // ----- By month (H14:L27) -----
+  sh.getRange('H14:L14').merge().setValue('📅 By Month')
     .setBackground('#B4A7D6').setFontWeight('bold').setHorizontalAlignment('center');
-  sh.getRange('H15:K15').setValues([['Month', 'Done', 'Kaza', 'Skipped']])
+  sh.getRange('H15:L15').setValues([['Month', 'Done', 'Kaza', 'Skipped', 'Farz %']])
     .setFontWeight('bold').setHorizontalAlignment('center').setBackground('#EFEFEF');
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const monthNames = months.map(function (name) { return [name]; });
@@ -404,31 +751,118 @@ function ensureDashboard_(ss, force) {
     const f = function (s) {
       return '=SUMPRODUCT((MONTH(' + rng_('A2:A367') + ')=' + m + ')*(' + rng_('B2:Q367') + '="' + s + '"))';
     };
-    return [f(CONFIG.DONE), f(CONFIG.KAZA), f(CONFIG.SKIPPED)];
+    return [f(CONFIG.DONE), f(CONFIG.KAZA), f(CONFIG.SKIPPED), '=IFERROR($T$' + (i + 7) + '*1,"–")'];
   });
   sh.getRange('H16:H27').setValues(monthNames);
-  sh.getRange('I16:K27').setFormulas(mf);
+  sh.getRange('I16:L27').setFormulas(mf);
+  sh.getRange('L16:L27').setNumberFormat('0%');
   sh.getRange('H16:H27').setFontWeight('bold');
-  sh.getRange('I16:K27').setHorizontalAlignment('center');
-  sh.getRange('H14:K27').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('I16:L27').setHorizontalAlignment('center');
+  sh.getRange('H14:L27').setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
 
-  // Chart (monthly)
-  const chart = sh.newChart()
+  // ----- Progress graphs: Namaz -----
+  sh.getRange('B29:L29').merge().setValue('📈 Namaz Progress — keep pushing, one prayer at a time')
+    .setBackground('#274E13').setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(13)
+    .setHorizontalAlignment('center');
+  sh.setRowHeight(29, 30);
+
+  const pctAxis = { format: '0%', viewWindow: { min: 0, max: 1 } };
+
+  // 1) Monthly stacked overview
+  sh.insertChart(sh.newChart()
     .setChartType(Charts.ChartType.COLUMN)
     .addRange(sh.getRange('H15:K27'))
     .setNumHeaders(1)
-    .setOption('title', 'Monthly Overview')
+    .setOption('title', 'Monthly Overview (Done / Kaza / Skipped)')
+    .setOption('isStacked', true)
     .setOption('colors', ['#6AA84F', '#E69138', '#CC0000'])
     .setOption('legend', { position: 'bottom' })
-    .setOption('width', 520).setOption('height', 300)
-    .setPosition(19, 2, 0, 0)
-    .build();
-  sh.insertChart(chart);
+    .setOption('width', 600).setOption('height', 300)
+    .setPosition(31, 2, 0, 0)
+    .build());
+
+  // 2) Monthly Farz % improvement
+  sh.insertChart(sh.newChart()
+    .setChartType(Charts.ChartType.LINE)
+    .addRange(sh.getRange('S6:T18'))
+    .setNumHeaders(1)
+    .setOption('title', 'Monthly Farz Done % — Your Improvement')
+    .setOption('colors', ['#38761D'])
+    .setOption('curveType', 'function')
+    .setOption('pointSize', 6)
+    .setOption('legend', { position: 'none' })
+    .setOption('vAxis', pctAxis)
+    .setOption('width', 560).setOption('height', 300)
+    .setPosition(31, 8, 0, 0)
+    .build());
+
+  // 3) Weekly Farz % trend
+  sh.insertChart(sh.newChart()
+    .setChartType(Charts.ChartType.AREA)
+    .addRange(sh.getRange('P6:Q59'))
+    .setNumHeaders(1)
+    .setOption('title', 'Weekly Farz Done % Trend')
+    .setOption('colors', ['#3C78D8'])
+    .setOption('legend', { position: 'none' })
+    .setOption('vAxis', pctAxis)
+    .setOption('hAxis', { title: 'Week of the year' })
+    .setOption('width', 600).setOption('height', 300)
+    .setPosition(48, 2, 0, 0)
+    .build());
+
+  // 4) Done % by prayer
+  sh.insertChart(sh.newChart()
+    .setChartType(Charts.ChartType.BAR)
+    .addRange(sh.getRange('H6:H12'))
+    .addRange(sh.getRange('L6:L12'))
+    .setNumHeaders(1)
+    .setOption('title', 'Done % by Prayer — Focus on the shortest bar')
+    .setOption('colors', ['#B45F06'])
+    .setOption('legend', { position: 'none' })
+    .setOption('hAxis', pctAxis)
+    .setOption('width', 560).setOption('height', 300)
+    .setPosition(48, 8, 0, 0)
+    .build());
+
+  // ----- Progress graphs: Roja -----
+  sh.getRange('B65:L65').merge().setValue('🌙 Roja Progress')
+    .setBackground('#674EA7').setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(13)
+    .setHorizontalAlignment('center');
+  sh.setRowHeight(65, 30);
+
+  // 5) Roja by month (stacked)
+  sh.insertChart(sh.newChart()
+    .setChartType(Charts.ChartType.COLUMN)
+    .addRange(sh.getRange('V6:Y18'))
+    .setNumHeaders(1)
+    .setOption('title', 'Roja by Month (Done / Done Later / Skipped)')
+    .setOption('isStacked', true)
+    .setOption('colors', ['#6AA84F', '#3C78D8', '#CC0000'])
+    .setOption('legend', { position: 'bottom' })
+    .setOption('width', 600).setOption('height', 300)
+    .setPosition(67, 2, 0, 0)
+    .build());
+
+  // 6) Roja split (pie)
+  sh.insertChart(sh.newChart()
+    .setChartType(Charts.ChartType.PIE)
+    .addRange(sh.getRange('B23:C25'))
+    .setNumHeaders(0)
+    .setOption('title', 'Roja — Done vs Done Later vs Skipped')
+    .setOption('colors', ['#6AA84F', '#3C78D8', '#CC0000'])
+    .setOption('pieHole', 0.4)
+    .setOption('legend', { position: 'bottom' })
+    .setOption('width', 560).setOption('height', 300)
+    .setPosition(67, 8, 0, 0)
+    .build());
+
+  // Delete unused rows / columns on the Dashboard
+  trimSheet_(sh, CONFIG.DASH_ROWS, CONFIG.DASH_COLS);
 
   return sh;
 }
 
-// Year-named sheets only (e.g. "2026"), newest first
+// Year-named Namaz sheets only (e.g. "2026"), newest first
 function yearSheetNames_(ss) {
   return ss.getSheets().map(function (s) { return s.getName(); })
     .filter(function (n) { return /^\d{4}$/.test(n); })
@@ -453,14 +887,18 @@ function refreshTrackerDropdown_(dash, toLatest) {
   if (toLatest || names.indexOf(cur) === -1) cell.setValue(Number(names[0]));
 }
 
-/* ---------- UPDATE BUTTON ---------- */
-// Menu item, checkbox on the Dashboard (F3), or a drawing button can all call this.
+/* ---------- UPDATE (one button: redraws everything, keeps your year) ---------- */
 function updateDashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const dash = ensureDashboard_(ss, false);
-  refreshTrackerDropdown_(dash, false);   // keeps the year you selected
-  updatePrayerTimes();
+  const old = ss.getSheetByName(CONFIG.DASH);
+  const keep = old ? String(old.getRange('C3').getValue()) : null;
+
+  const dash = ensureDashboard_(ss, true);
+  if (keep && ss.getSheetByName(keep)) dash.getRange('C3').setValue(Number(keep));
   SpreadsheetApp.flush();
+
+  updatePrayerTimes();
+  ss.setActiveSheet(dash);
   ss.toast('Dashboard updated ✅', 'Prayer Tracker', 4);
 }
 
@@ -473,12 +911,13 @@ function onDashboardEdit(e) {
     try {
       updateDashboard();
     } finally {
-      e.range.setValue(false);   // reset the "button"
+      const d = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.DASH);
+      if (d) d.getRange('F3').setValue(false);   // reset the "button"
     }
   }
 }
 
-/* ---------- TODAY'S PRAYER TIMES (written to the Dashboard) ---------- */
+/* ---------- TODAY'S PRAYER TIMES + SEHRI/IFTAR (written to the Dashboard) ---------- */
 function updatePrayerTimes() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ensureDashboard_(ss, false);
@@ -515,6 +954,12 @@ function updatePrayerTimes() {
     [fmt12_(m.zuhr - CONFIG.NOON_BLOCK) + ' - ' + fmt12_(m.zuhr)],
     [fmt12_(m.maghrib - CONFIG.MAGHRIB_BLOCK) + ' - ' + fmt12_(m.maghrib)]
   ]);
+
+  // Roja: today's Sehri end and Iftar
+  sheet.getRange('C20:C21').setValues([
+    [(m.fajr + CONFIG.SEHRI_OFFSET_MIN) / 1440],
+    [(m.maghrib + CONFIG.IFTAR_OFFSET_MIN) / 1440]
+  ]).setNumberFormat('h:mm AM/PM');
 }
 
 function toMin_(s) {
