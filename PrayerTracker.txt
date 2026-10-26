@@ -24,12 +24,9 @@ const CONFIG = {
   // Sheet sizes (unused rows/columns are deleted)
   YEAR_ROWS: 367,        // needed by dashboard formulas (leap year + header)
   DASH_ROWS: 85,
-  DASH_COLS: 25,
+  DASH_COLS: 15,
 
-  // Chart data block protection:
-  //   'warning' = pop-up warning before editing (works for everyone, including you)
-  //   'strict'  = only the owner can edit (others are blocked completely)
-  CHART_LOCK: 'warning',
+  HIDDEN_DATA: '__Data__',
 
   DONE: '✔ Done',
   KAZA: '↺ Kaza',
@@ -470,11 +467,11 @@ function applyKazaRule() {
 /* ---------- FORMULA HELPERS ---------- */
 // Reference a range on the Namaz year sheet chosen in Dashboard!C3
 function rng_(a1) {
-  return `INDIRECT("'"&$C$3&"'!${a1}")`;
+  return `INDIRECT("'"&'${CONFIG.DASH}'!$C$3&"'!${a1}")`;
 }
 // Reference a range on the Roja sheet of the chosen year
 function rj_(a1) {
-  return `INDIRECT("'${CONFIG.ROJA_PREFIX}"&$C$3&"'!${a1}")`;
+  return `INDIRECT("'${CONFIG.ROJA_PREFIX}"&'${CONFIG.DASH}'!$C$3&"'!${a1}")`;
 }
 
 // Farz Done / Farz Marked formula parts, limited by a mask (use '1' for the whole year)
@@ -506,74 +503,38 @@ function markedArr_() {
 }
 const SCAN_STREAK_ = 'SCAN(0,p,LAMBDA(a,v,IF(v=1,a+1,0)))';
 
-/* ---------- CHART DATA BLOCK (on the Dashboard, columns P:Y) ---------- */
-// Protects the chart data block (P4:Y59) so it is read-only
-function lockChartData_(sh) {
-  const DESC = 'Chart data (read only)';
-
-  // Remove old locks first so they don't pile up every time the dashboard is rebuilt
-  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) {
-    if (p.getDescription() === DESC) p.remove();
-  });
-
-  const p = sh.getRange('P4:Y59').protect().setDescription(DESC);
-
-  if (CONFIG.CHART_LOCK === 'strict') {
-    const me = Session.getEffectiveUser();
-    p.addEditor(me);
-    p.removeEditors(p.getEditors().filter(function (u) {
-      return u.getEmail() !== me.getEmail();
-    }));
-    if (p.canDomainEdit()) p.setDomainEdit(false);
-  } else {
-    p.setWarningOnly(true);
-  }
-}
-
 function buildChartData_(sh) {
+  sh.clear();
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const hdr = function (a1, vals) {
-    sh.getRange(a1).setValues([vals]).setFontWeight('bold').setBackground('#EFEFEF');
-  };
-
-  sh.getRange('P4:Y4').merge().setValue('Chart data (used by the graphs — do not edit)')
-    .setFontStyle('italic').setHorizontalAlignment('left');
-
-  // Weekly Farz % (P:Q) rows 7..59
-  hdr('P6:Q6', ['Week', 'Farz Done %']);
   const A = rng_('A2:A367');
+
+  // Weekly Farz % (A:B)
+  sh.getRange('A1:B1').setValues([['Week', 'Farz Done %']]);
   const wkNum = [], wkF = [];
   for (let w = 1; w <= 53; w++) {
     wkNum.push([w]);
     wkF.push([farzPct_('(INT((' + A + '-DATE(YEAR(' + A + '),1,1))/7)+1=' + w + ')')]);
   }
-  sh.getRange(7, 16, 53, 1).setValues(wkNum);
-  sh.getRange(7, 17, 53, 1).setFormulas(wkF).setNumberFormat('0%');
+  sh.getRange(2, 1, 53, 1).setValues(wkNum);
+  sh.getRange(2, 2, 53, 1).setFormulas(wkF);
 
-  // Monthly Farz % (S:T) rows 7..18
-  hdr('S6:T6', ['Month', 'Farz Done %']);
-  sh.getRange(7, 19, 12, 1).setValues(months.map(function (m) { return [m]; }));
-  sh.getRange(7, 20, 12, 1).setFormulas(months.map(function (m, i) {
+  // Monthly Farz % (D:E)
+  sh.getRange('D1:E1').setValues([['Month', 'Farz Done %']]);
+  sh.getRange(2, 4, 12, 1).setValues(months.map(function (m) { return [m]; }));
+  sh.getRange(2, 5, 12, 1).setFormulas(months.map(function (m, i) {
     return [farzPct_('(MONTH(' + A + ')=' + (i + 1) + ')')];
-  })).setNumberFormat('0%');
+  }));
 
-  // Monthly Roja counts (V:Y) rows 7..18
-  hdr('V6:Y6', ['Month', 'Done', 'Done Later', 'Skipped']);
-  sh.getRange(7, 22, 12, 1).setValues(months.map(function (m) { return [m]; }));
+  // Monthly Roja counts (G:J)
+  sh.getRange('G1:J1').setValues([['Month', 'Done', 'Done Later', 'Skipped']]);
+  sh.getRange(2, 7, 12, 1).setValues(months.map(function (m) { return [m]; }));
   const rf = months.map(function (m, i) {
     const f = function (s) {
       return '=IFERROR(SUMPRODUCT((MONTH(' + rj_('A2:A367') + ')=' + (i + 1) + ')*(' + rj_('E2:E367') + '="' + s + '")),0)';
     };
     return [f(CONFIG.DONE), f(CONFIG.LATER), f(CONFIG.SKIPPED)];
   });
-  sh.getRange(7, 23, 12, 3).setFormulas(rf);
-
-  sh.getRange('P5:Y59').setFontColor('#999999');
-  sh.getRange('P6:Q6').setFontColor('#666666');
-  sh.getRange('S6:T6').setFontColor('#666666');
-  sh.getRange('V6:Y6').setFontColor('#666666');
-  sh.getRange('P7:Y59').setHorizontalAlignment('center');
-  lockChartData_(sh);   // make the block read-only
+  sh.getRange(2, 8, 12, 3).setFormulas(rf);
 }
 
 /* ---------- DASHBOARD ---------- */
@@ -607,7 +568,6 @@ function ensureDashboard_(ss, force) {
   sh.setColumnWidth(8, 120);
   sh.setColumnWidths(9, 4, 80);
   sh.setColumnWidth(13, 20);
-  sh.setColumnWidths(16, 10, 85);   // chart data block P:Y
 
   // Title (shows the selected year)
   sh.getRange('B1:L1').merge()
@@ -626,7 +586,9 @@ function ensureDashboard_(ss, force) {
   refreshTrackerDropdown_(sh, true);
 
   // Chart data block (needs C3 to be set first)
-  buildChartData_(sh);
+  const ds = ss.getSheetByName(CONFIG.HIDDEN_DATA) || ss.insertSheet(CONFIG.HIDDEN_DATA);
+  ds.hideSheet();
+  buildChartData_(ds);
 
   // ----- Prayer times block (B5:C17) – values filled by updatePrayerTimes -----
   sh.getRange('B5:C5').merge().setBackground('#B6D7A8').setFontWeight('bold').setHorizontalAlignment('center');
@@ -708,7 +670,7 @@ function ensureDashboard_(ss, force) {
   const yp = farzParts_('1');
   sh.getRange('F22').setFormula('=IFERROR((' + yp.done + ')/(' + yp.marked + '),0)').setNumberFormat('0.0%');
   sh.getRange('F23').setFormula(
-    '=IF(VALUE($C$3)<>YEAR(TODAY()),"–",IFERROR(INDEX($T$7:$T$18,MONTH(TODAY()))-INDEX($T$7:$T$18,MONTH(TODAY())-1),"–"))'
+    '=IF(VALUE($C$3)<>YEAR(TODAY()),"–",IFERROR(INDEX(\'' + CONFIG.HIDDEN_DATA + '\'!$E$2:$E$13,MONTH(TODAY()))-INDEX(\'' + CONFIG.HIDDEN_DATA + '\'!$E$2:$E$13,MONTH(TODAY())-1),"–"))'
   ).setNumberFormat('+0.0%;-0.0%;0.0%');
   sh.getRange('E24:F24').merge().setFormula(
     '=IF(ISNUMBER(F23),IF(F23>0,"📈 Improving — keep it up, in shaa Allah!",IF(F23=0,"➡ Steady — push a little harder 💪","📉 A dip this month — start fresh today 🌙")),IF(F19>=7,"🔥 "&F19&"-day streak! Don\'t break it!","🤲 Every prayer on time counts"))'
@@ -784,7 +746,7 @@ function ensureDashboard_(ss, force) {
   // 2) Monthly Farz % improvement
   sh.insertChart(sh.newChart()
     .setChartType(Charts.ChartType.LINE)
-    .addRange(sh.getRange('S6:T18'))
+    .addRange(ds.getRange('D1:E13'))
     .setNumHeaders(1)
     .setOption('title', 'Monthly Farz Done % — Your Improvement')
     .setOption('colors', ['#38761D'])
@@ -799,7 +761,7 @@ function ensureDashboard_(ss, force) {
   // 3) Weekly Farz % trend
   sh.insertChart(sh.newChart()
     .setChartType(Charts.ChartType.AREA)
-    .addRange(sh.getRange('P6:Q59'))
+    .addRange(ds.getRange('A1:B54'))
     .setNumHeaders(1)
     .setOption('title', 'Weekly Farz Done % Trend')
     .setOption('colors', ['#3C78D8'])
@@ -833,7 +795,7 @@ function ensureDashboard_(ss, force) {
   // 5) Roja by month (stacked)
   sh.insertChart(sh.newChart()
     .setChartType(Charts.ChartType.COLUMN)
-    .addRange(sh.getRange('V6:Y18'))
+    .addRange(ds.getRange('G1:J13'))
     .setNumHeaders(1)
     .setOption('title', 'Roja by Month (Done / Done Later / Skipped)')
     .setOption('isStacked', true)
